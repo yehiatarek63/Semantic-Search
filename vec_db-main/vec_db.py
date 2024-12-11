@@ -7,10 +7,11 @@ import shutil
 DB_SEED_NUMBER = 42
 ELEMENT_SIZE = np.dtype(np.float32).itemsize
 DIMENSION = 70
-RANDOM_HYPERPLANS_NUM = 25
+RANDOM_HYPERPLANS_NUM = 10
+HYPERPLANE_SEED = 42
 
 class VecDB:
-    def __init__(self, database_file_path="saved_db.dat", index_file_path="index", new_db=True, db_size=None) -> None:
+    def __init__(self, database_file_path="saved_db.dat", index_file_path="index.txt", new_db=True, db_size=None) -> None:
         self.db_path = database_file_path
         self.index_path = index_file_path
         self.signatures = set()
@@ -27,7 +28,6 @@ class VecDB:
         rng = np.random.default_rng(DB_SEED_NUMBER)
         vectors = rng.random((size, DIMENSION), dtype=np.float32)
         self._write_vectors_to_file(vectors)
-        self.hyperplanes = np.random.normal(loc=0, scale=1, size=(RANDOM_HYPERPLANS_NUM, DIMENSION))
         self._build_index()
 
     def _write_vectors_to_file(self, vectors: np.ndarray) -> None:
@@ -64,43 +64,43 @@ class VecDB:
         return np.array(vectors)
     
     def retrieve(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5):
+        query_signature = self._generate_signature(query)
+        bucket_number = int(''.join(map(str, query_signature)), 2)
         results = []
-        tried_signatures = set()
-        signature = self._generate_signature(query)
-        signature_str = ''.join(map(str, signature))
-        signatures_to_try = [signature]
-        hamming_distance = 0
-
-        while len(results) <= top_k:
-            new_signatures = []
-            for sig in signatures_to_try:
-                sig_str = ''.join(map(str, sig))
-                if sig_str in tried_signatures:
-                    continue
-                tried_signatures.add(sig_str)
-                signature_file_path = os.path.join(self.index_path, f"{sig_str}.txt")
-                if os.path.exists(signature_file_path):
-                    with open(signature_file_path, 'r') as f:
-                        for line in f:
-                            row_num = int(line.strip())
-                            vector = self.get_one_row(row_num)
-                            score = self._cal_score(query, vector)
-                            results.append((row_num, score))
-                            if len(results) >= top_k:
-                                break
-                if len(results) >= top_k:
-                    break
-            if len(results) >= top_k:
+        
+        while len(results) < top_k:
+            row_indices = self.retrieve_from_certain_bucket(bucket_number)
+            results.extend(row_indices)
+            bucket_number += 1
+            if bucket_number >= 2**len(query_signature):
                 break
-            hamming_distance += 1
-            new_signatures = self._get_signatures_at_hamming_distance(signature, hamming_distance)
-            signatures_to_try = new_signatures
-
-        results = sorted(results, key=lambda x: x[1], reverse=True)[:top_k]
-        final_results = [result[0] for result in results]
-        print(final_results)
-        return final_results
-
+            
+        sorted_results = self.brute_force_retrieve(query, results)
+        print(sorted_results[:top_k])
+        return sorted_results[:top_k]
+            
+            
+    def retrieve_from_certain_bucket(self, line_number):
+        results = []
+        with open(self.index_path, 'r') as f:
+            for line_num, line in enumerate(f):
+                if line_num == line_number:
+                    row_numbers = list(map(int, line.strip().split()))
+                    for row_num in row_numbers:
+                        row = self.get_one_row(row_num)
+                        results.append(row_num)
+        return results
+    
+    def brute_force_retrieve(self, query, results):
+        sorted_results = []
+        temp = []
+        for result in results:
+            vector = self.get_one_row(result)
+            score = self._cal_score(query, vector)
+            temp.append((result, score))
+        sorted_results = [x[0] for x in sorted(temp, key=lambda x: x[1], reverse=True)]
+        return sorted_results
+        
     
     def _cal_score(self, vec1, vec2):
         dot_product = np.dot(vec1, vec2)
@@ -110,27 +110,39 @@ class VecDB:
         return cosine_similarity
 
     def _build_index(self):
-        # Placeholder for index building logic
+        self.hyperplanes_seed = HYPERPLANE_SEED
+        hyperplane_rng = np.random.default_rng(self.hyperplanes_seed)
+        self.hyperplanes = hyperplane_rng.normal(loc=0, scale=1, size=(RANDOM_HYPERPLANS_NUM, DIMENSION))        
+
+        if os.path.exists(self.index_path):
+            os.remove(self.index_path)
+        open(self.index_path, 'w').close()
+        
         vectors = self.get_all_rows()
-        for i, vector in enumerate(vectors):
+        
+        for row_num, vector in enumerate(vectors): 
             signature = self._generate_signature(vector)
-            signature_tuple = tuple(signature)
-            self.signatures.add(signature_tuple)
             signature_str = ''.join(map(str, signature))
+            bucket_number = int(signature_str, 2)
             
-            signature_file_path = os.path.join(self.index_path, f"{signature_str}.txt")
+            with open(self.index_path, 'a+') as f:
+                f.seek(0)
+                lines = f.readlines()
+        
+            while len(lines) <= bucket_number:
+                lines.append("\n")
             
-            self._append_to_file(signature_file_path, i)
-        
-    def _append_to_file(self, file_path, row_num):
-        """Append row number to the file corresponding to a signature."""
-        with open(file_path, 'a') as f:
-            f.write(f"{row_num}\n")
-        
-    def _save_index(self, index):
-        # Save the index to the file using pickle
-        with open(self.index_path, 'wb') as f:
-            pickle.dump(index, f)
+            current_line = lines[bucket_number].strip()
+            if current_line:
+                lines[bucket_number] = lines[bucket_number].strip() + " " + f"{row_num} " + "\n"
+            else:
+                lines[bucket_number] = f"{row_num}\n"
+            
+
+            with open(self.index_path, 'w') as f:
+                f.writelines(lines)
+                
+        print("Index built successfully.")
             
     def _generate_signature(self, vector):
         signature = []
@@ -138,51 +150,4 @@ class VecDB:
             dot_product = np.dot(vector, hyperplane)
             signature.append(1 if dot_product > 0 else 0)
         return signature
-            
-
-    db = VecDB(db_size = 10**4)
-
-    # Retrieve similar images for a given query
-    query_vector = np.random.rand(1,70) # Query vector of dimension 70
-    print(db._get_num_records())
-        
-    def _cal_score(self, vec1, vec2):
-        dot_product = np.dot(vec1, vec2)
-        norm_vec1 = np.linalg.norm(vec1)
-        norm_vec2 = np.linalg.norm(vec2)
-        cosine_similarity = dot_product / (norm_vec1 * norm_vec2)
-        return cosine_similarity
-
-    def _build_index(self):
-        # Placeholder for index building logic
-        vectors = self.get_all_rows()
-        for i, vector in enumerate(vectors):
-            signature = self._generate_signature(vector)
-            signature_tuple = tuple(signature)
-            self.signatures.add(signature_tuple)
-            signature_str = ''.join(map(str, signature))
-            
-            signature_file_path = os.path.join(self.index_path, f"{signature_str}.txt")
-            
-            self._append_to_file(signature_file_path, i)
-        print("Index Built")
-        
-    def _append_to_file(self, file_path, row_num):
-        """Append row number to the file corresponding to a signature."""
-        with open(file_path, 'a') as f:
-            f.write(f"{row_num}\n")
-        
-    def _save_index(self, index):
-        # Save the index to the file using pickle
-        with open(self.index_path, 'wb') as f:
-            pickle.dump(index, f)
-            
-            
-
-    def _generate_signature(self, vector):
-        signature = []
-        for hyperplane in self.hyperplanes:
-            dot_product = np.dot(vector, hyperplane)
-            signature.append(1 if dot_product > 0 else 0)
-        return signature
-            
+    
