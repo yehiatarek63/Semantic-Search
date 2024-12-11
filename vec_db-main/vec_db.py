@@ -7,7 +7,7 @@ import shutil
 DB_SEED_NUMBER = 42
 ELEMENT_SIZE = np.dtype(np.float32).itemsize
 DIMENSION = 70
-RANDOM_HYPERPLANS_NUM = 20
+RANDOM_HYPERPLANS_NUM = 10
 HYPERPLANE_SEED = 42
 
 class VecDB:
@@ -15,6 +15,7 @@ class VecDB:
         self.db_path = database_file_path
         self.index_path = index_file_path
         self.num_buckets = 0
+        self.populated_buckets = []
         if new_db:
             if db_size is None:
                 raise ValueError("You need to provide the size of the database")
@@ -65,58 +66,19 @@ class VecDB:
     
     def retrieve(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5):
         query_signature = self._generate_signature(query)
-        target_bucket = int(''.join(map(str, query_signature)), 2)
+        bucket_number = int(''.join(map(str, query_signature)), 2)
         results = []
         
-        # Perform binary search directly on the file
-        with open(self.index_path, 'r') as f:
-            left, right = 0, self._get_num_lines() - 1
-            closest_line = None
-
-            while left <= right:
-                mid = (left + right) // 2
-
-                # Seek to the middle line
-                f.seek(self._get_line_offset(mid))
-                line = f.readline()
-                bucket, _ = line.strip().split(': ')
-                bucket = int(bucket)
-
-                if bucket == target_bucket:
-                    closest_line = line
-                    break
-                elif bucket < target_bucket:
-                    left = mid + 1
-                else:
-                    right = mid - 1
-
-            # If exact match not found, choose the closest bucket greater than or equal to target
-            if closest_line is None:
-                f.seek(self._get_line_offset(left if left < self.num_buckets else right))
-                closest_line = f.readline()
-
-            # Process the closest bucket
-            bucket, row_indices_str = closest_line.strip().split(': ')
-            row_indices = list(map(int, row_indices_str.split()))
+        while len(results) < top_k:
+            row_indices = self.retrieve_from_certain_bucket(bucket_number)
             results.extend(row_indices)
-
-        # Retrieve the results using brute force
-        sorted_results = self.brute_force_retrieve(query, results[:top_k])
+            bucket_number += 1
+            if bucket_number >= 2**len(query_signature):
+                break
+            
+        sorted_results = self.brute_force_retrieve(query, results)
         print(sorted_results[:top_k])
         return sorted_results[:top_k]
-
-    def _get_num_lines(self):
-        with open(self.index_path, 'r') as f:
-            return sum(1 for _ in f)
-
-    def _get_line_offset(self, line_number):
-        with open(self.index_path, 'r') as f:
-            offset = 0
-            for current_line_number, line in enumerate(f):
-                if current_line_number == line_number:
-                    break
-                offset += len(line)
-            return offset
             
             
     def retrieve_from_certain_bucket(self, line_number):
@@ -140,7 +102,7 @@ class VecDB:
         sorted_results = [x[0] for x in sorted(temp, key=lambda x: x[1], reverse=True)]
         return sorted_results
         
-    
+  
     def _cal_score(self, vec1, vec2):
         dot_product = np.dot(vec1, vec2)
         norm_vec1 = np.linalg.norm(vec1)
@@ -154,7 +116,7 @@ class VecDB:
         self.hyperplanes = hyperplane_rng.normal(loc=0, scale=1, size=(RANDOM_HYPERPLANS_NUM, DIMENSION))
 
         # Initialize an empty dictionary for the index
-        index_dict = {}
+        index_dict = {i: [] for i in range(2**RANDOM_HYPERPLANS_NUM)}
 
         vectors = self.get_all_rows()
 
@@ -177,7 +139,9 @@ class VecDB:
         with open(self.index_path, 'w') as f:
             for bucket, row_indices in sorted_index.items():
                 row_indices_str = ' '.join(map(str, sorted(row_indices)))
-                f.write(f"{bucket}: {row_indices_str}\n")
+                f.write(f"{row_indices_str}\n")
+                
+        self.populated_buckets = sorted(list(sorted_index.keys()))
 
         print("Index built successfully.")
             
