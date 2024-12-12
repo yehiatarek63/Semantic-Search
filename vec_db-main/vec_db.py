@@ -3,6 +3,7 @@ import numpy as np
 import os
 import pickle
 import shutil
+from memory_profiler import profile
 
 DB_SEED_NUMBER = 42
 ELEMENT_SIZE = np.dtype(np.float32).itemsize
@@ -16,6 +17,7 @@ class VecDB:
         self.index_path = index_file_path
         self.num_buckets = 0
         self.populated_buckets = []
+        self.bucket_set = set()
         if new_db:
             if db_size is None:
                 raise ValueError("You need to provide the size of the database")
@@ -63,24 +65,66 @@ class VecDB:
         num_records = self._get_num_records()
         vectors = np.memmap(self.db_path, dtype=np.float32, mode='r', shape=(num_records, DIMENSION))
         return np.array(vectors)
-    
+    @profile
     def retrieve(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5):
         query_signature = self._generate_signature(query)
         bucket_number = int(''.join(map(str, query_signature)), 2)
         results = []
+        if bucket_number not in self.bucket_set:
+            results = self.retrieve_from_nonexistent_bucket(bucket_number, top_k, results)
+        else:
+            results = self.retrieve_from_existing_bucket(bucket_number, query, top_k)
         
+        results = self.brute_force_retrieve(query, results)
+        return results[:top_k]
+            
+            
+    def retrieve_from_nonexistent_bucket(self, bucket_number, top_k, results):
+        buckets = self.populated_buckets.copy()
         while len(results) < top_k:
-            row_indices = self.retrieve_from_certain_bucket(bucket_number)
-            results.extend(row_indices)
-            bucket_number += 1
-            if bucket_number >= 2**len(query_signature):
-                break
+            closest_bucket = self.find_closest_bucket(bucket_number, buckets)
+            bucket_values = self.retrieve_from_certain_bucket(closest_bucket)
+            results.extend(bucket_values)
+            buckets.remove(closest_bucket)
+        return results
+
+
+    def find_closest_bucket(self, bucket_number, buckets):
+        left, right = 0, len(buckets) - 1
+        while left <= right:
+            mid = (left + right) // 2
+
+            if buckets[mid] == bucket_number:
+                return self.populated_buckets[mid] 
+            elif buckets[mid] < bucket_number:
+                left = mid + 1
+            else:
+                right = mid - 1
+
+        left_closest = buckets[left] if left < len(buckets) else float('inf')
+        right_closest = buckets[right] if right >= 0 else float('inf')
+
+        if abs(left_closest - bucket_number) < abs(right_closest - bucket_number):
+            return left_closest
+        else:
+            return right_closest
+        
+    def retrieve_from_existing_bucket(self, bucket_number, query, top_k):
+        results = []
+        bucket_values = self.retrieve_from_certain_bucket(bucket_number)
+        results.extend(bucket_values)
+        if len(results) < top_k:
+            buckets = self.populated_buckets.copy()
+            buckets.remove(bucket_number)
+        while len(results) < top_k:
+            closest_bucket = self.find_closest_bucket(bucket_number, buckets)
+            bucket_values = self.retrieve_from_certain_bucket(closest_bucket)
+            results.extend(bucket_values)
+            buckets.remove(closest_bucket)
             
-        sorted_results = self.brute_force_retrieve(query, results)
-        print(sorted_results[:top_k])
-        return sorted_results[:top_k]
-            
-            
+        return results
+        
+        
     def retrieve_from_certain_bucket(self, line_number):
         results = []
         with open(self.index_path, 'r') as f:
@@ -130,6 +174,7 @@ class VecDB:
             if bucket_number not in index_dict:
                 index_dict[bucket_number] = []
             index_dict[bucket_number].append(row_num)
+            self.bucket_set.add(bucket_number)
 
         # Sort the dictionary by bucket keys
         sorted_index = dict(sorted(index_dict.items()))
@@ -141,7 +186,8 @@ class VecDB:
                 row_indices_str = ' '.join(map(str, sorted(row_indices)))
                 f.write(f"{row_indices_str}\n")
                 
-        self.populated_buckets = sorted(list(sorted_index.keys()))
+        self.populated_buckets = sorted(list(self.bucket_set))
+        self.bucket_set = set(self.populated_buckets)
 
         print("Index built successfully.")
             
