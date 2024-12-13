@@ -8,7 +8,7 @@ from memory_profiler import profile
 DB_SEED_NUMBER = 42
 ELEMENT_SIZE = np.dtype(np.float32).itemsize
 DIMENSION = 70
-RANDOM_HYPERPLANS_NUM = 10
+RANDOM_HYPERPLANS_NUM = 20
 HYPERPLANE_SEED = 42
 
 class VecDB:
@@ -65,65 +65,36 @@ class VecDB:
         num_records = self._get_num_records()
         vectors = np.memmap(self.db_path, dtype=np.float32, mode='r', shape=(num_records, DIMENSION))
         return np.array(vectors)
-    @profile
+    
     def retrieve(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5):
+        # Step 1: Generate the signature for the query vector
         query_signature = self._generate_signature(query)
-        bucket_number = int(''.join(map(str, query_signature)), 2)
+        query_signature_str = ''.join(map(str, query_signature))
+
+        # Step 2: Compute Hamming distances to all populated buckets
+        bucket_distances = []
+        for bucket in self.populated_buckets:
+            bucket_signature = f"{bucket:0{len(query_signature_str)}b}"
+            hamming_distance = sum(c1 != c2 for c1, c2 in zip(query_signature_str, bucket_signature))
+            bucket_distances.append((bucket, hamming_distance))
+
+        # Step 3: Sort buckets by Hamming distance
+        bucket_distances.sort(key=lambda x: x[1])
+
+        # Step 4: Retrieve contents from buckets until top_k results are gathered
         results = []
-        if bucket_number not in self.bucket_set:
-            results = self.retrieve_from_nonexistent_bucket(bucket_number, top_k, results)
-        else:
-            results = self.retrieve_from_existing_bucket(bucket_number, query, top_k)
-        
+        for bucket, _ in bucket_distances:
+            if len(results) >= top_k:
+                break
+
+            bucket_values = self.retrieve_from_certain_bucket(bucket)
+            results.extend(bucket_values)
+
+        # Step 5: Perform a brute-force search over the collected results to rank them by cosine similarity
         results = self.brute_force_retrieve(query, results)
+
         return results[:top_k]
-            
-            
-    def retrieve_from_nonexistent_bucket(self, bucket_number, top_k, results):
-        buckets = self.populated_buckets.copy()
-        while len(results) < top_k:
-            closest_bucket = self.find_closest_bucket(bucket_number, buckets)
-            bucket_values = self.retrieve_from_certain_bucket(closest_bucket)
-            results.extend(bucket_values)
-            buckets.remove(closest_bucket)
-        return results
 
-
-    def find_closest_bucket(self, bucket_number, buckets):
-        left, right = 0, len(buckets) - 1
-        while left <= right:
-            mid = (left + right) // 2
-
-            if buckets[mid] == bucket_number:
-                return self.populated_buckets[mid] 
-            elif buckets[mid] < bucket_number:
-                left = mid + 1
-            else:
-                right = mid - 1
-
-        left_closest = buckets[left] if left < len(buckets) else float('inf')
-        right_closest = buckets[right] if right >= 0 else float('inf')
-
-        if abs(left_closest - bucket_number) < abs(right_closest - bucket_number):
-            return left_closest
-        else:
-            return right_closest
-        
-    def retrieve_from_existing_bucket(self, bucket_number, query, top_k):
-        results = []
-        bucket_values = self.retrieve_from_certain_bucket(bucket_number)
-        results.extend(bucket_values)
-        if len(results) < top_k:
-            buckets = self.populated_buckets.copy()
-            buckets.remove(bucket_number)
-        while len(results) < top_k:
-            closest_bucket = self.find_closest_bucket(bucket_number, buckets)
-            bucket_values = self.retrieve_from_certain_bucket(closest_bucket)
-            results.extend(bucket_values)
-            buckets.remove(closest_bucket)
-            
-        return results
-        
         
     def retrieve_from_certain_bucket(self, line_number):
         results = []
@@ -157,7 +128,11 @@ class VecDB:
     def _build_index(self):
         self.hyperplanes_seed = HYPERPLANE_SEED
         hyperplane_rng = np.random.default_rng(self.hyperplanes_seed)
-        self.hyperplanes = hyperplane_rng.normal(loc=0, scale=1, size=(RANDOM_HYPERPLANS_NUM, DIMENSION))
+
+        # Generate normalized random hyperplanes
+        random_planes = hyperplane_rng.normal(loc=0, scale=1, size=(RANDOM_HYPERPLANS_NUM, DIMENSION))
+        self.hyperplanes = random_planes / np.linalg.norm(random_planes, axis=1, keepdims=True)
+
 
         # Initialize an empty dictionary for the index
         index_dict = {i: [] for i in range(2**RANDOM_HYPERPLANS_NUM)}
@@ -194,7 +169,10 @@ class VecDB:
     def _generate_signature(self, vector):
         signature = []
         for hyperplane in self.hyperplanes:
-            dot_product = np.dot(vector, hyperplane)
+            normalized_vector = self.normalize_vector(vector)
+            dot_product = np.dot(normalized_vector, hyperplane)
             signature.append(1 if dot_product > 0 else 0)
         return signature
     
+    def normalize_vector(self, vector):
+        return vector / np.linalg.norm(vector)
