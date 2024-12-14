@@ -4,27 +4,24 @@ import os
 import pickle
 import shutil
 from memory_profiler import profile
+from sklearn.cluster import MiniBatchKMeans
 
 DB_SEED_NUMBER = 42
 ELEMENT_SIZE = np.dtype(np.float32).itemsize
+NUM_CLUSTERS = 150
 DIMENSION = 70
-RANDOM_HYPERPLANS_NUM = 20
-HYPERPLANE_SEED = 42
 
 class VecDB:
     def __init__(self, database_file_path="saved_db.dat", index_file_path="index.txt", new_db=True, db_size=None) -> None:
         self.db_path = database_file_path
         self.index_path = index_file_path
-        self.num_buckets = 0
-        self.populated_buckets = []
-        self.bucket_set = set()
-        if new_db:
-            if db_size is None:
-                raise ValueError("You need to provide the size of the database")
-            # delete the old DB file if exists
-            if os.path.exists(self.db_path):
-                os.remove(self.db_path)
-            self.generate_database(db_size)
+        # if new_db:
+        #     if db_size is None:
+        #         raise ValueError("You need to provide the size of the database")
+        #     # delete the old DB file if exists
+        #     if os.path.exists(self.db_path):
+        #         os.remove(self.db_path)
+        #     self.generate_database(db_size)
             
     
     def generate_database(self, size: int) -> None:
@@ -67,43 +64,32 @@ class VecDB:
         return np.array(vectors)
     
     def retrieve(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5):
-        # Step 1: Generate the signature for the query vector
-        query_signature = self._generate_signature(query)
-        query_signature_str = ''.join(map(str, query_signature))
-
-        # Step 2: Compute Hamming distances to all populated buckets
-        bucket_distances = []
-        for bucket in self.populated_buckets:
-            bucket_signature = f"{bucket:0{len(query_signature_str)}b}"
-            hamming_distance = sum(c1 != c2 for c1, c2 in zip(query_signature_str, bucket_signature))
-            bucket_distances.append((bucket, hamming_distance))
-
-        # Step 3: Sort buckets by Hamming distance
-        bucket_distances.sort(key=lambda x: x[1])
-
-        # Step 4: Retrieve contents from buckets until top_k results are gathered
+        
+        centroids_file_path = os.path.splitext(self.index_path)[0] + "_centroids.pkl"
+        with open(centroids_file_path, 'rb') as centroids_file:
+            centroids = pickle.load(centroids_file)
+            
+        query = self.normalize_vector(query)
+        similarities = np.dot(centroids, query.T).flatten() 
+        sorted_centroid_indices = np.argsort(similarities)[::-1] 
         results = []
-        for bucket, _ in bucket_distances:
+        
+        for centroid_index in sorted_centroid_indices:
+            cluster_results = self.retrieve_from_certain_cluster(centroid_index)
+            results.extend(cluster_results)
             if len(results) >= top_k:
                 break
-
-            bucket_values = self.retrieve_from_certain_bucket(bucket)
-            results.extend(bucket_values)
-
-        # Step 5: Perform a brute-force search over the collected results to rank them by cosine similarity
-        results = self.brute_force_retrieve(query, results)
-
-        return results[:top_k]
+            
+        return self.brute_force_retrieve(query, results)[:top_k]
 
         
-    def retrieve_from_certain_bucket(self, line_number):
+    def retrieve_from_certain_cluster(self, cluster_id):
         results = []
         with open(self.index_path, 'r') as f:
             for line_num, line in enumerate(f):
-                if line_num == line_number:
+                if line_num == cluster_id:
                     row_numbers = list(map(int, line.strip().split()))
                     for row_num in row_numbers:
-                        row = self.get_one_row(row_num)
                         results.append(row_num)
         return results
     
@@ -126,53 +112,39 @@ class VecDB:
         return cosine_similarity
 
     def _build_index(self):
-        self.hyperplanes_seed = HYPERPLANE_SEED
-        hyperplane_rng = np.random.default_rng(self.hyperplanes_seed)
-
-        # Generate normalized random hyperplanes
-        random_planes = hyperplane_rng.normal(loc=0, scale=1, size=(RANDOM_HYPERPLANS_NUM, DIMENSION))
-        self.hyperplanes = random_planes / np.linalg.norm(random_planes, axis=1, keepdims=True)
-
-
-        # Initialize an empty dictionary for the index
-        index_dict = {i: [] for i in range(2**RANDOM_HYPERPLANS_NUM)}
-
+        # Load all vectors from the database
         vectors = self.get_all_rows()
+        
+        # Perform k-means clustering
+        kmeans = MiniBatchKMeans(
+            n_clusters=NUM_CLUSTERS,
+            batch_size=int(10000),
+            n_init=10, 
+            random_state=DB_SEED_NUMBER
+        )
+        kmeans.fit(vectors)
+        
+        
+        cluster_assignments = kmeans.labels_
+        centroids = kmeans.cluster_centers_ 
+        
+        index_dict = {i: [] for i in range(NUM_CLUSTERS)}
+        
+        for vector_id, cluster_id in enumerate(cluster_assignments):
+            index_dict[cluster_id].append(vector_id)
+        
+        centroids_file_path = os.path.splitext(self.index_path)[0] + "_centroids.pkl"
+        with open(centroids_file_path, 'wb') as centroids_file:
+            pickle.dump(centroids, centroids_file)
 
-        for row_num, vector in enumerate(vectors):
-            # Generate the signature and compute the bucket number
-            signature = self._generate_signature(vector)
-            signature_str = ''.join(map(str, signature))
-            bucket_number = int(signature_str, 2)
+        
 
-            # Add the row number to the appropriate bucket in the dictionary
-            if bucket_number not in index_dict:
-                index_dict[bucket_number] = []
-            index_dict[bucket_number].append(row_num)
-            self.bucket_set.add(bucket_number)
-
-        # Sort the dictionary by bucket keys
-        sorted_index = dict(sorted(index_dict.items()))
-        self.num_buckets = len(sorted_index)
-
-        # Write the sorted index dictionary to a text file
         with open(self.index_path, 'w') as f:
-            for bucket, row_indices in sorted_index.items():
-                row_indices_str = ' '.join(map(str, sorted(row_indices)))
+            for cluster_id, vector_indices in sorted(index_dict.items()):
+                row_indices_str = ' '.join(map(str, sorted(vector_indices)))
                 f.write(f"{row_indices_str}\n")
                 
-        self.populated_buckets = sorted(list(self.bucket_set))
-        self.bucket_set = set(self.populated_buckets)
-
-        print("Index built successfully.")
             
-    def _generate_signature(self, vector):
-        signature = []
-        for hyperplane in self.hyperplanes:
-            normalized_vector = self.normalize_vector(vector)
-            dot_product = np.dot(normalized_vector, hyperplane)
-            signature.append(1 if dot_product > 0 else 0)
-        return signature
     
     def normalize_vector(self, vector):
         return vector / np.linalg.norm(vector)
