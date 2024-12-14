@@ -85,7 +85,8 @@ class VecDB:
         
     def retrieve_from_certain_cluster(self, cluster_id):
         results = []
-        with open(self.index_path, 'r') as f:
+        index_file_path = os.path.splitext(self.index_path)[0] + ".txt"
+        with open(index_file_path, 'r') as f:
             for line_num, line in enumerate(f):
                 if line_num == cluster_id:
                     row_numbers = list(map(int, line.strip().split()))
