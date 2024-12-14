@@ -3,25 +3,25 @@ import numpy as np
 import os
 import pickle
 import shutil
+from memory_profiler import profile
+from sklearn.cluster import MiniBatchKMeans
 
 DB_SEED_NUMBER = 42
 ELEMENT_SIZE = np.dtype(np.float32).itemsize
+NUM_CLUSTERS = 150
 DIMENSION = 70
-RANDOM_HYPERPLANS_NUM = 10
-HYPERPLANE_SEED = 42
 
 class VecDB:
     def __init__(self, database_file_path="saved_db.dat", index_file_path="index.txt", new_db=True, db_size=None) -> None:
         self.db_path = database_file_path
         self.index_path = index_file_path
-        self.signatures = set()
-        if new_db:
-            if db_size is None:
-                raise ValueError("You need to provide the size of the database")
-            # delete the old DB file if exists
-            if os.path.exists(self.db_path):
-                os.remove(self.db_path)
-            self.generate_database(db_size)
+        # if new_db:
+        #     if db_size is None:
+        #         raise ValueError("You need to provide the size of the database")
+        #     # delete the old DB file if exists
+        #     if os.path.exists(self.db_path):
+        #         os.remove(self.db_path)
+        #     self.generate_database(db_size)
             
     
     def generate_database(self, size: int) -> None:
@@ -64,30 +64,32 @@ class VecDB:
         return np.array(vectors)
     
     def retrieve(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5):
-        query_signature = self._generate_signature(query)
-        bucket_number = int(''.join(map(str, query_signature)), 2)
+        
+        centroids_file_path = os.path.splitext(self.index_path)[0] + "_centroids.pkl"
+        with open(centroids_file_path, 'rb') as centroids_file:
+            centroids = pickle.load(centroids_file)
+            
+        query = self.normalize_vector(query)
+        similarities = np.dot(centroids, query.T).flatten() 
+        sorted_centroid_indices = np.argsort(similarities)[::-1] 
         results = []
         
-        while len(results) < top_k:
-            row_indices = self.retrieve_from_certain_bucket(bucket_number)
-            results.extend(row_indices)
-            bucket_number += 1
-            if bucket_number >= 2**len(query_signature):
+        for centroid_index in sorted_centroid_indices:
+            cluster_results = self.retrieve_from_certain_cluster(centroid_index)
+            results.extend(cluster_results)
+            if len(results) >= top_k:
                 break
             
-        sorted_results = self.brute_force_retrieve(query, results)
-        print(sorted_results[:top_k])
-        return sorted_results[:top_k]
-            
-            
-    def retrieve_from_certain_bucket(self, line_number):
+        return self.brute_force_retrieve(query, results)[:top_k]
+
+        
+    def retrieve_from_certain_cluster(self, cluster_id):
         results = []
         with open(self.index_path, 'r') as f:
             for line_num, line in enumerate(f):
-                if line_num == line_number:
+                if line_num == cluster_id:
                     row_numbers = list(map(int, line.strip().split()))
                     for row_num in row_numbers:
-                        row = self.get_one_row(row_num)
                         results.append(row_num)
         return results
     
@@ -101,7 +103,7 @@ class VecDB:
         sorted_results = [x[0] for x in sorted(temp, key=lambda x: x[1], reverse=True)]
         return sorted_results
         
-    
+  
     def _cal_score(self, vec1, vec2):
         dot_product = np.dot(vec1, vec2)
         norm_vec1 = np.linalg.norm(vec1)
@@ -110,44 +112,39 @@ class VecDB:
         return cosine_similarity
 
     def _build_index(self):
-        self.hyperplanes_seed = HYPERPLANE_SEED
-        hyperplane_rng = np.random.default_rng(self.hyperplanes_seed)
-        self.hyperplanes = hyperplane_rng.normal(loc=0, scale=1, size=(RANDOM_HYPERPLANS_NUM, DIMENSION))        
-
-        if os.path.exists(self.index_path):
-            os.remove(self.index_path)
-        open(self.index_path, 'w').close()
-        
+        # Load all vectors from the database
         vectors = self.get_all_rows()
         
-        for row_num, vector in enumerate(vectors): 
-            signature = self._generate_signature(vector)
-            signature_str = ''.join(map(str, signature))
-            bucket_number = int(signature_str, 2)
-            
-            with open(self.index_path, 'a+') as f:
-                f.seek(0)
-                lines = f.readlines()
+        # Perform k-means clustering
+        kmeans = MiniBatchKMeans(
+            n_clusters=NUM_CLUSTERS,
+            batch_size=int(10000),
+            n_init=10, 
+            random_state=DB_SEED_NUMBER
+        )
+        kmeans.fit(vectors)
         
-            while len(lines) <= bucket_number:
-                lines.append("\n")
-            
-            current_line = lines[bucket_number].strip()
-            if current_line:
-                lines[bucket_number] = lines[bucket_number].strip() + " " + f"{row_num} " + "\n"
-            else:
-                lines[bucket_number] = f"{row_num}\n"
-            
+        
+        cluster_assignments = kmeans.labels_
+        centroids = kmeans.cluster_centers_ 
+        
+        index_dict = {i: [] for i in range(NUM_CLUSTERS)}
+        
+        for vector_id, cluster_id in enumerate(cluster_assignments):
+            index_dict[cluster_id].append(vector_id)
+        
+        centroids_file_path = os.path.splitext(self.index_path)[0] + "_centroids.pkl"
+        with open(centroids_file_path, 'wb') as centroids_file:
+            pickle.dump(centroids, centroids_file)
 
-            with open(self.index_path, 'w') as f:
-                f.writelines(lines)
+        
+
+        with open(self.index_path, 'w') as f:
+            for cluster_id, vector_indices in sorted(index_dict.items()):
+                row_indices_str = ' '.join(map(str, sorted(vector_indices)))
+                f.write(f"{row_indices_str}\n")
                 
-        print("Index built successfully.")
             
-    def _generate_signature(self, vector):
-        signature = []
-        for hyperplane in self.hyperplanes:
-            dot_product = np.dot(vector, hyperplane)
-            signature.append(1 if dot_product > 0 else 0)
-        return signature
     
+    def normalize_vector(self, vector):
+        return vector / np.linalg.norm(vector)
