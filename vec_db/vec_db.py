@@ -65,7 +65,7 @@ class VecDB:
     
     def retrieve(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5):
         
-        centroids_file_path = os.path.splitext(self.index_path)[0] + "_centroids.pkl"
+        centroids_file_path = os.path.splitext(self.index_path)[0] + ".pkl"
         with open(centroids_file_path, 'rb') as centroids_file:
             centroids = pickle.load(centroids_file)
             
