@@ -89,9 +89,9 @@ class VecDB:
         elif self.num_records <= 10**7:
             top_m_clusters = 160
         elif self.num_records <= 15000000:
-            top_m_clusters = 40
+            top_m_clusters = 50
         else:
-            top_m_clusters = 20
+            top_m_clusters = 1
         query = self.normalize_vector(query)
         similarities = np.dot(centroids, query.T).flatten()
         sorted_centroid_indices = np.argsort(similarities)[::-1][:top_m_clusters]
