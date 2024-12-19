@@ -94,7 +94,8 @@ class VecDB:
         similarities = np.dot(centroids, query.T).flatten()
         sorted_centroid_indices = np.argsort(similarities)[::-1][:top_m_clusters]
         results = []
-        with open(self.index_path, 'r') as index_file:
+        index_file_path = os.path.splitext(self.index_path)[0] + ".txt"
+        with open(index_file_path, 'r') as index_file:
             for cluster_id in sorted_centroid_indices:
                 index_file.seek(offsets[cluster_id])  # Jump to the byte offset of the cluster
                 row_numbers = list(map(int, index_file.readline().strip().split()))
