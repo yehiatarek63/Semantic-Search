@@ -85,11 +85,11 @@ class VecDB:
         centroids = np.array([item[0] for item in centroids_with_offsets])
         offsets = [item[1] for item in centroids_with_offsets]
         if self.num_records <= 10**6:
-            top_m_clusters = 400
+            top_m_clusters = 350
         elif self.num_records <= 10**7:
-            top_m_clusters = 160
+            top_m_clusters = 150
         elif self.num_records <= 15000000:
-            top_m_clusters = 50
+            top_m_clusters = 25
         else:
             top_m_clusters = 1
         query = self.normalize_vector(query)
