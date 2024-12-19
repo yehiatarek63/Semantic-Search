@@ -89,7 +89,7 @@ class VecDB:
         elif self.num_records <= 10**7:
             top_m_clusters = 150
         elif self.num_records <= 15000000:
-            top_m_clusters = 25
+            top_m_clusters = 50
         else:
             top_m_clusters = 1
         query = self.normalize_vector(query)
