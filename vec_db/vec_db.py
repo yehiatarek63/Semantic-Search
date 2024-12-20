@@ -87,7 +87,7 @@ class VecDB:
         if self.num_records <= 10**6:
             top_m_clusters = 350
         elif self.num_records <= 10**7:
-            top_m_clusters = 150
+            top_m_clusters = 65
         elif self.num_records <= 15000000:
             top_m_clusters = 50
         else:
